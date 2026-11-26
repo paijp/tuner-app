@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>掃引同期 波形チューナー</title>
+<style>
+  body{margin:0;font-family:sans-serif;background:#111;color:#eee}
+  .bar{display:flex;flex-wrap:wrap;gap:8px;align-items:center;padding:10px}
+  input[type=number]{width:90px;font-size:18px}
+  button{font-size:18px;padding:6px 14px}
+  canvas{display:block;width:100%;height:60vh;background:#000}
+  #info{padding:0 10px;font-size:14px;color:#aaa}
+</style>
+</head>
+<body>
+<div class="bar">
+  <button id="start">開始</button>
+  <label>掃引 <input id="freq" type="number" value="440" step="0.1" min="20" max="5000"> Hz</label>
+  <label>周期数 <input id="cycles" type="number" value="2" min="1" max="20"></label>
+  <label>更新 <input id="rate" type="number" value="2" min="0.5" max="30" step="0.5"> 回/秒</label>
+  <label>ゲイン <input id="gain" type="number" value="1" min="0.1" max="100" step="0.5"></label>
+</div>
+<canvas id="cv"></canvas>
+<div id="info">「開始」でマイクを有効化します。波形が止まって見えれば掃引周波数と一致、右/左に流れればズレています。</div>
+<script>
+const BUF = 1 << 16;           // リングバッファ長
+const ring = new Float32Array(BUF);
+let total = 0;                 // これまでの累積サンプル数（絶対時刻）
+let sr = 48000, timer = null;
+const cv = document.getElementById('cv'), ctx = cv.getContext('2d');
+const $ = id => document.getElementById(id);
+
+$('start').onclick = async () => {
+  const stream = await navigator.mediaDevices.getUserMedia({audio:{
+    echoCancellation:false, noiseSuppression:false, autoGainControl:false}});
+  const ac = new AudioContext();
+  sr = ac.sampleRate;
+  const src = ac.createMediaStreamSource(stream);
+  const sp = ac.createScriptProcessor(4096, 1, 1);
+  sp.onaudioprocess = e => {
+    const d = e.inputBuffer.getChannelData(0);
+    for (let i = 0; i < d.length; i++) ring[(total + i) & (BUF - 1)] = d[i];
+    total += d.length;
+  };
+  src.connect(sp); sp.connect(ac.destination); // 出力は無音
+  $('start').disabled = true;
+  schedule();
+};
+['rate'].forEach(id => $(id).onchange = schedule);
+function schedule(){
+  if (timer) clearInterval(timer);
+  timer = setInterval(draw, 1000 / Math.max(0.5, +$('rate').value));
+}
+
+function sample(t){ // 絶対時刻 t(サンプル単位, 実数) を線形補間
+  const i = Math.floor(t), f = t - i;
+  return ring[i & (BUF-1)] * (1-f) + ring[(i+1) & (BUF-1)] * f;
+}
+
+function draw(){
+  const W = cv.width = cv.clientWidth * devicePixelRatio;
+  const H = cv.height = cv.clientHeight * devicePixelRatio;
+  const freq = +$('freq').value, cyc = +$('cycles').value, g = +$('gain').value;
+  const T = sr / freq;                 // 1周期のサンプル数
+  const span = T * cyc;
+  // 絶対時刻 0 を基準に位相同期: 開始点を周期 T の整数倍に合わせる
+  const latest = total - 2 - span;
+  const k = Math.floor(latest / T);
+  const t0 = k * T;
+  if (t0 < total - BUF + 2) return;
+
+  ctx.fillStyle = '#000'; ctx.fillRect(0,0,W,H);
+  ctx.strokeStyle = '#333'; ctx.lineWidth = 1; ctx.beginPath();
+  for (let c = 0; c <= cyc; c++){ const x = c/cyc*W; ctx.moveTo(x,0); ctx.lineTo(x,H); }
+  ctx.moveTo(0,H/2); ctx.lineTo(W,H/2); ctx.stroke();
+
+  ctx.strokeStyle = '#0f0'; ctx.lineWidth = 2*devicePixelRatio; ctx.beginPath();
+  let peak = 0;
+  for (let x = 0; x < W; x++){
+    const v = sample(t0 + span * x / W);
+    peak = Math.max(peak, Math.abs(v));
+    const y = H/2 - v * g * H/2;
+    x ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
+  }
+  ctx.stroke();
+  $('info').textContent = `fs=${sr}Hz  掃引=${freq}Hz (周期 ${(1000/freq).toFixed(3)}ms)  ピーク=${peak.toFixed(3)}`;
+}
+</script>
+</body>
+</html>
