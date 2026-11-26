@@ -22,6 +22,7 @@
   <label>ゲイン <input id="gain" type="number" value="1" min="0.1" max="100" step="0.5"></label>
 </div>
 <canvas id="cv"></canvas>
+<div id="freqdisp" style="font-size:32px;padding:6px 10px;font-family:monospace">--- Hz</div>
 <div id="info">「開始」でマイクを有効化します。波形が止まって見えれば掃引周波数と一致、右/左に流れればズレています。</div>
 <script>
 const BUF = 1 << 16;           // リングバッファ長
@@ -58,6 +59,35 @@ function sample(t){ // 絶対時刻 t(サンプル単位, 実数) を線形補�
   return ring[i & (BUF-1)] * (1-f) + ring[(i+1) & (BUF-1)] * f;
 }
 
+// YIN 法で基本周波数を推定（40〜2000Hz）
+function detectFreq(){
+  const N = 8192, minLag = Math.floor(sr/2000), maxLag = Math.ceil(sr/40);
+  const start = total - N - maxLag - 2;
+  if (start < total - BUF + 2 || start < 0) return null;
+  const x = new Float32Array(N + maxLag);
+  let rms = 0;
+  for (let i = 0; i < x.length; i++){ x[i] = ring[(start+i) & (BUF-1)]; rms += x[i]*x[i]; }
+  if (Math.sqrt(rms/x.length) < 0.003) return null; // 無音
+  const d = new Float32Array(maxLag+2);
+  for (let tau = 1; tau <= maxLag+1; tau++){
+    let s = 0;
+    for (let i = 0; i < N; i++){ const v = x[i]-x[i+tau]; s += v*v; }
+    d[tau] = s;
+  }
+  // 累積平均正規化
+  let sum = 0; d[0] = 1;
+  for (let tau = 1; tau <= maxLag+1; tau++){ sum += d[tau]; d[tau] = d[tau]*tau/(sum||1); }
+  let tau = -1;
+  for (let t = minLag; t <= maxLag; t++){
+    if (d[t] < 0.15){ while (t+1 <= maxLag && d[t+1] < d[t]) t++; tau = t; break; }
+  }
+  if (tau < 0) return null;
+  const a = d[tau-1], b = d[tau], c = d[tau+1];
+  const den = a - 2*b + c;
+  const off = den ? 0.5*(a-c)/den : 0;
+  return sr / (tau + off);
+}
+
 function draw(){
   const W = cv.width = cv.clientWidth * devicePixelRatio;
   const H = cv.height = cv.clientHeight * devicePixelRatio;
@@ -84,6 +114,11 @@ function draw(){
     x ? ctx.lineTo(x,y) : ctx.moveTo(x,y);
   }
   ctx.stroke();
+  const fd = detectFreq();
+  if (fd){
+    const cents = 1200*Math.log2(fd/freq);
+    $('freqdisp').textContent = `${fd.toFixed(2)} Hz  (${cents>=0?'+':''}${cents.toFixed(1)} cent)`;
+  } else $('freqdisp').textContent = '--- Hz';
   $('info').textContent = `fs=${sr}Hz  掃引=${freq}Hz (周期 ${(1000/freq).toFixed(3)}ms)  ピーク=${peak.toFixed(3)}`;
 }
 </script>
